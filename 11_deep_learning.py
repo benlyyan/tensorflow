@@ -610,18 +610,71 @@ def replace_a_layer_dnn():
         for v in tf.trainable_variables():
             print(v.name)
 
-replace_a_layer_dnn()
+# replace_a_layer_dnn()
 
 
+# freezing the lower layers
+
+def freeze_lower_layer_dnn():
+    tf.reset_default_graph()
+    n_inputs = 28*28
+    n_hidden1 = 300
+    n_hidden2 = 50
+    n_hidden3 = 50
+    n_hidden4 = 20
+    n_outputs = 10 
+    learning_rate = 0.01 
+    x = tf.placeholder(tf.float32,shape=(None,n_inputs),name='x')
+    y = tf.placeholder(tf.int64,shape=(None),name='y')
+
+    with tf.name_scope('dnn'):
+        hidden1 = tf.layers.dense(x, n_hidden1,activation=tf.nn.relu,name='hidden1')
+        hidden2 = tf.layers.dense(hidden1, n_hidden2,activation=tf.nn.relu,name='hidden2')
+        hidden3 = tf.layers.dense(hidden2, n_hidden3,activation=tf.nn.relu,name='hidden3')
+        hidden4 = tf.layers.dense(hidden3, n_hidden4,activation=tf.nn.relu,name='hidden4')
+        logits = tf.layers.dense(hidden4, n_outputs,activation=None,name='outputs')
+
+    with tf.name_scope('loss'):
+        xentropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=y,logits=logits)
+        loss = tf.reduce_mean(xentropy,name='loss')
+    with tf.name_scope('eval'):
+        correct = tf.nn.in_top_k(logits, y, 1)
+        accuracy = tf.reduce_mean(tf.cast(correct, tf.float32),name='accuracy')
+
+    with tf.name_scope('train'):
+        optimizer = tf.train.GradientDescentOptimizer(learning_rate)
+
+        # freeze 1,2 layers,train 3,4 layers,every time training 3,4layers
+        train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,scope="hidden[34]|outputs")
+        training_op = optimizer.minimize(loss,var_list=train_vars)
+
+    init = tf.global_variables_initializer()
+    new_saver = tf.train.Saver()
+
+    # every time restore 1,2,3 layers
+    reuse_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES,scope="hidden[123]")
+    resue_vars_dict = dict([(var.op.name,var) for var in reuse_vars])
+    restore_saver = tf.train.Saver(resue_vars_dict)
+
+    init = tf.global_variables_initializer()
+    saver = tf.train.Saver()
+
+    epoch = 20
+    batch_size = 50 
+    with tf.Session() as sess:
+        init.run()
+        restore_saver.restore(sess, "./models/clip_gradient_5hidden_layers_with_4th_replace.ckpt")
+        for epoch in range(epoch):
+            for iteration in range(mnist.train.num_examples//batch_size):
+                x_batch,y_batch = mnist.train.next_batch(batch_size)
+                sess.run(training_op,feed_dict={x:x_batch,y:y_batch})
+            accuracy_val = accuracy.eval(feed_dict={x:mnist.test.images,y:mnist.test.labels})
+            
+            print(epoch,"test accuacy:",accuracy_val)    
+
+        save_path = saver.save(sess,"./models/freezing_model.ckpt")
 
 
-
-
-
-
-
-
-
-
+freeze_lower_layer_dnn()
 
 
