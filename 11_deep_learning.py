@@ -675,6 +675,182 @@ def freeze_lower_layer_dnn():
         save_path = saver.save(sess,"./models/freezing_model.ckpt")
 
 
-freeze_lower_layer_dnn()
+# freeze_lower_layer_dnn()
 
+# learning rate scheduling
+def schedule_learn_rate():
+    tf.reset_default_graph()
+    n_inputs = 28*28
+    n_hidden1 = 300
+    n_hidden2 = 50
+    n_hidden3 = 10
+    n_outputs = 10
+    x = tf.placeholder(tf.float32,shape=(None,n_inputs),name='x')
+    y = tf.placeholder(tf.int64,shape=(None),name='y')
 
+    with tf.name_scope('dnn'):
+        hidden1 = tf.layers.dense(x, n_hidden1,activation=tf.nn.relu,name='hidden1')
+        hidden2 = tf.layers.dense(hidden1, n_hidden2,activation=tf.nn.relu,name='hidden2')
+        hidden3 = tf.layers.dense(hidden2, n_hidden3,activation=tf.nn.relu,name='hidden3')
+        logits = tf.layers.dense(hidden3,n_outputs,activation=None,name='outputs')
+
+    with tf.name_scope('loss'):
+        xentropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=y,logits=logits)
+        loss = tf.reduce_mean(xentropy,name='loss')
+
+    with tf.name_scope('eval'):
+        correct = tf.nn.in_top_k(logits, y, 1)
+        accuracy = tf.reduce_mean(tf.cast(correct, tf.float32),name='accuracy')
+
+    with tf.name_scope('train'):
+        init_learning_rate = 0.1
+        decay_steps = 10000
+        decay_rate = 0.1
+
+        global_step = tf.Variable(0,trainable=False,name='global_step')
+        learning_rate = tf.train.exponential_decay(init_learning_rate, global_step, decay_steps, decay_rate)
+        optimizer = tf.train.MomentumOptimizer(learning_rate, 0.9)
+        training_op = optimizer.minimize(loss,global_step=global_step)
+    init = tf.global_variables_initializer()
+    saver = tf.train.Saver()
+
+    n_epochs = 5
+    batch_size = 50
+
+    with tf.Session() as sess:
+        init.run()
+        for epoch in range(n_epochs):
+            for iteration in range(mnist.train.num_examples//batch_size):
+                x_batch,y_batch = mnist.train.next_batch(batch_size)
+                sess.run(training_op,feed_dict={x:x_batch,y:y_batch})
+            accuracy_val = accuracy.eval(feed_dict={x:mnist.test.images,y:mnist.test.labels})
+            print(epoch,"test accuracy:",accuracy_val)
+        save_path = saver.save(sess, './models/schedule_learning_rate_model.ckpt')
+
+# schedule_learn_rate()
+
+# l1 and l2 regularization 
+# method1 get weights from all layers if you have a few layers
+# method2 use dense function with kernel_regularizer argument
+# i.e. kernel_regularizer=tf.contrib.layers.l1_regularizer(scale)
+# later reg_losses = tf.get_collection(tf.GraphKeys.REGULARIZATION_LOSSES)
+# loss = tf.add_n([base_loss] + reg_losses, name="loss")
+
+def l_norm_dnn():
+    tf.reset_default_graph()
+    n_inputs = 28*28
+    n_hidden1 = 300
+    n_outputs = 10
+    learning_rate = 0.01
+    x = tf.placeholder(tf.float32,shape=(None,n_inputs),name='x')
+    y = tf.placeholder(tf.int64,shape=(None),name='y')
+
+    with tf.name_scope('dnn'):
+        hidden1 = tf.layers.dense(x, n_hidden1,activation=tf.nn.relu,name='hidden1')
+        logits = tf.layers.dense(hidden1, n_outputs,activation=None,name='outputs')
+    w1 = tf.get_default_graph().get_tensor_by_name('hidden1/kernel:0')
+    w2 = tf.get_default_graph().get_tensor_by_name('outputs/kernel:0')
+    scale = 0.001
+
+    with tf.name_scope('loss'):
+        xentropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=y,logits=logits)
+        base_loss = tf.reduce_mean(xentropy,name='xentropy')
+        reg_loss = tf.reduce_sum(tf.abs(w1)+tf.reduce_sum(tf.abs(w2)))
+        loss = tf.add(base_loss, scale*reg_loss,name='loss')
+
+    with tf.name_scope('eval'):
+        correct = tf.nn.in_top_k(logits, y, 1)
+        accuracy = tf.reduce_mean(tf.cast(correct, tf.float32),name='accuracy')
+    learning_rate = 0.01
+
+    with tf.name_scope('train'):
+        optimizer = tf.train.GradientDescentOptimizer(learning_rate)
+        training_op = optimizer.minimize(loss)
+
+    init = tf.global_variables_initializer()
+    saver = tf.train.Saver()
+    n_epochs = 20
+    batch_size = 200
+
+    with tf.Session() as sess:
+        init.run()
+        for epoch in range(n_epochs):
+            for iteration in range(mnist.train.num_examples//batch_size):
+                x_batch,y_batch = mnist.train.next_batch(batch_size)
+                sess.run(training_op,feed_dict={x:x_batch,y:y_batch})
+
+            acc_eval = accuracy.eval(feed_dict={x:mnist.test.images,y:mnist.test.labels})
+            print(epoch,"acc_test:",acc_eval)
+        save_path = saver.save(sess,'./models/l1_norm_model.ckpt')
+
+# l_norm_dnn()
+
+# ex dnn
+
+he_init = tf.contrib.layers.variance_scaling_initializer()
+def dnn5(inputs,n_hidden_layers=5,n_neurons=100,name=None,activation=tf.nn.elu,initializer=he_init):
+    with tf.variable_scope(name,'dnn'):
+        for layer in range(n_hidden_layers):
+            inputs = tf.layers.dense(inputs,n_neurons,activation=activation,kernel_initializer=initializer,
+                name="hidden%d" % (layer+1))
+        return inputs 
+def ex_8_1():
+    n_inputs = 28*28
+    n_outputs = 5
+    tf.reset_default_graph()
+    x = tf.placeholder(tf.float32,shape=(None,n_inputs),name='x')
+    y = tf.placeholder(tf.int64,shape=(None),name='y')
+    dnn_outputs = dnn5(x)
+    logits = tf.layers.dense(dnn_outputs, n_outputs,kernel_initializer=he_init,name='logits')
+    y_proba = tf.nn.softmax(logits,name='y_proba')
+
+    learning_rate = 0.01
+    with tf.name_scope('loss'):
+        xentropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=y,logits=logits)
+        loss = tf.reduce_mean(xentropy,name='loss')
+    optimizer = tf.train.AdamOptimizer(learning_rate)
+    training_op = optimizer.minimize(loss,name='training_op')
+
+    correct = tf.nn.in_top_k(logits, y, 1)
+    accuracy = tf.reduce_mean(tf.cast(correct, tf.float32),name='accuracy')
+    init = tf.global_variables_initializer()
+    saver = tf.train.Saver()
+
+    x_train1 = mnist.train.images[mnist.train.labels<5]
+    y_train1 = mnist.train.labels[mnist.train.labels<5]
+    x_val1 = mnist.validation.images[mnist.validation.labels<5]
+    y_val1 = mnist.validation.labels[mnist.validation.labels<5]
+    x_test1 = mnist.test.images[mnist.test.labels<5]
+    y_test1 = mnist.test.labels[mnist.test.labels<5]
+
+    n_epochs = 100
+    batch_size = 20
+
+    max_checks_without_progress = 20
+    checks_without_progress = 0
+    best_loss = np.infty
+
+    with tf.Session() as sess:
+        init.run()
+        for epoch in range(n_epochs):
+            rnd_index = np.random.permutation(len(x_train1))
+            for rnd_ind in np.array_split(rnd_index, len(x_train1)//batch_size):
+                x_batch,y_batch = x_train1[rnd_ind],y_train1[rnd_ind]
+                sess.run(training_op,feed_dict={x:x_batch,y:y_batch})
+            loss_val,acc_val = sess.run([loss,accuracy],feed_dict={x:x_val1,y:y_val1})
+            if loss_val < best_loss:
+                save_path = saver.save(sess, './models/ex_8_1_models.ckpt')
+                best_loss = loss_val
+                checks_without_progress = 0
+            else:
+                checks_without_progress +=1
+                if checks_without_progress > max_checks_without_progress:
+                    print('early stopping')
+                    break
+            print(epoch,'val_loss:',loss_val,'best loss:',best_loss,'acc:',acc_val)
+    with tf.Session() as sess:
+        saver.restore(sess, './models/ex_8_1_models.ckpt')
+        acc_test = accuracy.eval(feed_dict={x:x_test1,y:y_test1})
+        print('final test accuracy:{:.2f}%'.format(acc_test*100))
+
+ex_8_1()
