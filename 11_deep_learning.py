@@ -188,6 +188,7 @@ def batch_norm_dnn():
         batch_norm_layer = partial(tf.layers.batch_normalization,training=is_training,momentum=0.9)
 
         dense_layer = partial(tf.layers.dense,kernel_initializer=he_init)
+
     hidden1 = dense_layer(x,n_hidden1,name='hidden1')
     bn1 = tf.nn.elu(batch_norm_layer(hidden1))
 
@@ -853,4 +854,178 @@ def ex_8_1():
         acc_test = accuracy.eval(feed_dict={x:x_test1,y:y_test1})
         print('final test accuracy:{:.2f}%'.format(acc_test*100))
 
-ex_8_1()
+# ex_8_1()
+
+# tuning the parameters using cross-validation
+from sklearn.base import BaseEstimator,ClassifierMixin 
+from sklearn.exceptions import NotFittedError
+
+class DNNClassifier(BaseEstimator,ClassifierMixin):
+    def __init__(self,n_hidden_layers=5,n_neurons=100,optimizer_class=tf.train.AdamOptimizer,
+        learning_rate=0.01,batch_size=20,activation=tf.nn.elu,initializer=he_init,
+        batch_norm_momentum=None,dropout_rate=None,random_state=None):
+        self.n_hidden_layers = n_hidden_layers
+        self.n_neurons = n_neurons
+        self.optimizer_class = optimizer_class
+        self.learning_rate = learning_rate
+        self.activation = activation
+        self.batch_size = batch_size
+        self.initializer = initializer
+        self.batch_norm_momentum = batch_norm_momentum
+        self.dropout_rate = dropout_rate
+        self.random_state = random_state
+        self._session = None 
+
+    def _dnn(self,inputs):
+        for layer in range(self.n_hidden_layers):
+            if self.dropout_rate:
+                inputs = tf.layers.dropout(inputs,self.dropout_rate,training=self._training)
+            inputs = tf.layers.dense(inputs, self.n_neurons,kernel_initializer=self.initializer,name="hidden%d" %(layer+1))
+            if self.batch_norm_momentum:
+                inputs = tf.layers.batch_normalization(inputs, momentum=self.batch_norm_momentum,training=self._training)
+            inputs = self.activation(inputs,name="hidden%d_out" %(layer+1))
+        return inputs
+
+    def _build_graph(self,n_inputs,n_outputs):
+        if self.random_state is not None:
+            tf.set_random_seed(self.random_state)
+            np.random.seed(self.random_state)
+        x = tf.placeholder(tf.float32,shape=(None,n_inputs),name="x")
+        y = tf.placeholder(tf.int64,shape=(None),name="y")
+        if self.batch_norm_momentum or self.dropout_rate:
+            self._training = tf.placeholder_with_default(False, shape=(),name="training")
+        else:
+            self._training=None 
+        dnn_outputs = self._dnn(x)
+        logits = tf.layers.dense(dnn_outputs, n_outputs,kernel_initializer=he_init)
+        y_prob = tf.nn.softmax(logits,name="y_proba")
+        xentropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=y,logits=logits)
+        loss = tf.reduce_mean(xentropy,name="loss")
+        optimizer = self.optimizer_class(learning_rate=self.learning_rate)
+        training_op = optimizer.minimize(loss)
+        correct = tf.nn.in_top_k(logits, y, 1)
+        accuracy = tf.reduce_mean(tf.cast(correct, tf.float32),name="accuracy")
+        init = tf.global_variables_initializer()
+        saver = tf.train.Saver()
+
+        self._x,self._y = x,y
+        self._y_proba,self._loss = y_prob,loss
+        self._init,self._saver = init,saver 
+        self._training_op,self._accuracy = training_op,accuracy
+
+    def close_session(self):
+        if self._session:
+            self._session.close()
+    def _get_model_params(self):
+        with self._graph.as_default():
+            gvars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES)
+        return {gavr.op.name:value for gavr,value in zip(gvars,self._session.run(gvars))}
+    def _restore_model_params(self,model_params):
+        gvar_names = list(model_params.keys())
+        assign_ops = {gvar_name:self._graph.get_operation_by_name(gvar_name+"/Assign") for gvar_name in gvar_names}
+        init_values = {gvar_name:assign_op.inputs[1] for gvar_name,assign_op in assign_ops.items()}
+
+        feed_dict = {init_values[gvar_name]:model_params[gvar_name] for gvar_name in gvar_names}
+        self._session.run(assign_ops,feed_dict=feed_dict)
+    def fit(self,x,y,n_epochs=100,x_valid=None,y_valid=None):
+        self.close_session()
+        n_inputs = x.shape[1]
+        self.class_ = np.unique(y)
+        n_outputs = len(self.class_)
+        self.class_to_index_ = {label:index for index,label in enumerate(self.class_)}
+        y = np.array([self.class_to_index_[label] for label in y],dtype=np.int32)
+        self._graph = tf.Graph()
+        with self._graph.as_default():
+            self._build_graph(n_inputs, n_outputs)
+            extra_update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+
+        max_checks_without_progress = 20
+        checks_without_progress = 0
+        best_loss = np.infty 
+        best_params = None 
+
+        self._session = tf.Session(graph=self._graph)
+        with self._session.as_default() as sess:
+            self._init.run()
+            for epoch in range(n_epochs):
+                rnd_idx = np.random.permutation(len(x))
+                for rnd_indices in np.array_split(rnd_idx, len(x)//self.batch_size):
+                    x_batch,y_batch = x[rnd_indices],y[rnd_indices]
+                    feed_dict = {self._x:x_batch,self._y:y_batch}
+                    if self._training is not None:
+                        feed_dict[self._training] = True 
+                    sess.run(self._training_op,feed_dict=feed_dict)
+                    if extra_update_ops:
+                        sess.run(extra_update_ops,feed_dict=feed_dict)
+                if x_valid is not None and y_valid is not None:
+                    loss_val,acc_val = sess.run([self._loss,self._accuracy],feed_dict={self._x:x_valid,self._y:y_valid})
+                    if loss_val<best_loss:
+                        best_params = self._get_model_params()
+                        best_loss = loss_val
+                        checks_without_progress = 0
+                    else:
+                        checks_without_progress+=1
+                    print("{} validation loss:{:.6f} best loss: {:.6f} accuracy: {:.2f}%".format(epoch,loss_val,
+                        best_loss,acc_val*100))
+                    if checks_without_progress>max_checks_without_progress:
+                        print("early stopping")
+                        break 
+                else:
+                    loss_train,acc_train = sess.run([self._loss,self._accuracy],feed_dict={self._x:x_batch,
+                        self._y:y_batch})
+                    print("{} last training batch loss:{:.6f} accuracy:{:.2f}%".format(epoch,
+                        loss_train,acc_train*100))
+            if best_params:
+                self._restore_model_params(best_params)
+            return self 
+
+    def predict_proba(self,x):
+        if not self._session:
+            raise NotFittedError("this %s instance is not fitted yet" % self.__class__.__name__)
+        with self._session.as_default() as sess:
+            return self._y_proba.eval(feed_dict={self._x:x})
+    def predict(self,x):
+        class_indices = np.argmax(self.predict_proba(x),axis=1)
+        return np.array([[self.class_[class_index]] for class_index in class_indices],np.int32)
+    def save(self,path):
+        self._saver.save(self._session, path)
+
+from sklearn.metrics import accuracy_score 
+def test_tuning_params():
+    x_train1 = mnist.train.images[mnist.train.labels<5]
+    y_train1 = mnist.train.labels[mnist.train.labels<5]
+    x_val1 = mnist.validation.images[mnist.validation.labels<5]
+    y_val1 = mnist.validation.labels[mnist.validation.labels<5]
+    x_test1 = mnist.test.images[mnist.test.labels<5]
+    y_test1 = mnist.test.labels[mnist.test.labels<5]
+    dnn_clf = DNNClassifier(random_state=42)
+    dnn_clf.fit(x_train1, y_train1,n_epochs=200,x_valid=x_val1,y_valid=y_val1)
+    y_pred = dnn_clf.predict(x_test1)
+    print(accuracy_score(y_test1, y_pred))
+
+
+# test_tuning_params()
+from sklearn.model_selection import RandomizedSearchCV 
+def random_search_cv():
+    x_train1 = mnist.train.images[mnist.train.labels<5]
+    y_train1 = mnist.train.labels[mnist.train.labels<5]
+    x_val1 = mnist.validation.images[mnist.validation.labels<5]
+    y_val1 = mnist.validation.labels[mnist.validation.labels<5]
+    x_test1 = mnist.test.images[mnist.test.labels<5]
+    y_test1 = mnist.test.labels[mnist.test.labels<5]
+
+    param_distribs = {"n_neurons":[90,100,120,140,160],
+        "batch_size":[10,50,100,200],
+        "learning_rate":[0.01,0.02,0.05,0.1],
+        "activation":[tf.nn.relu,tf.nn.elu],
+        "batch_norm_momentum":[0.9,0.95,0.98,0.999],}
+    random_search_bn = RandomizedSearchCV(DNNClassifier(random_state=42), param_distribs,n_iter=50,
+        fit_params={"x_valid":x_val1,"y_valid":y_val1,"n_epochs":200},
+        random_state=42,verbose=2)
+    random_search_bn.fit(x_train1,y_train1)
+
+    print(random_search_bn.best_params_)
+    y_pred = random_search_bn.predict(x_test1)
+    accuracy_score(y_test1, y_pred)
+
+random_search_cv()
